@@ -64,7 +64,15 @@ FontTextureFile=models\fonts_pl.txd
 | `FontMetricsFile` | A DAT with `[FONT_ID]` sections 0 and 1. Each needs 208 `[PROP]` widths, `[UNPROP]`, and `[REPLACEMENT_SPACE_CHAR]`. |
 | `FontTextureFile` | A TXD containing `font2` for slot 0 and `font1` for slot 1. The atlas glyph layout must match the GXT text bytes and DAT metrics. |
 
-The active code is exposed at `CMenuManager::m_nPrefsLanguage` (address `0xBA67CC` on 1.0 US Hoodlum). Codes 0–4 belong to the stock languages. Registered codes are shared by all packs for the same language. Unregistered packs without a valid private code leave the stock code visible. The stock preference is kept as a startup fallback in the INI. Select a stock language before removing the ASI, because unpatched Hoodlum expects a code from 0 to 4 in `gta_sa.set`.
+### What `LanguageId` means
+
+`LanguageId` is the numeric language code. A section ID such as `Russian.SanLTD` identifies a particular translation and is saved in the INI. Two Russian translations can use different section IDs and share code `5`.
+
+- **0–4** are the stock GTA codes. For stock English, the API returns `0` and `"english"`.
+- **Registered languages** get their codes from the section ID prefix. For example, `LanguageId=5` is optional in both `[Language.Russian]` and `[Language.Russian.SanLTD]`. If specified, the value must match the [language code registry](LANGUAGE_IDS.md). Codes 15–63 are reserved for future assignments.
+- **64–127** are private codes for unregistered packs. Choose an unused code such as `LanguageId=64`. Without a valid code, the API returns `-1` for the active pack and GTA retains the stock preference value.
+
+With compatible hooks installed, the active code is exposed at `CMenuManager::m_nPrefsLanguage` (address `0xBA67CC` on 1.0 US Hoodlum) and saved to `gta_sa.set`. The last stock code is kept in the INI as a fallback during startup.
 
 You can reorder the INI sections freely. If you rename a pack ID, select the language again in the game.
 
