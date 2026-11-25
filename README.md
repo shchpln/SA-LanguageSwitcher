@@ -1,8 +1,8 @@
-# SA Language Switcher
+# SA-LanguageSwitcher
 
 English · [Русский](README_RU.md)
 
-**SA Language Switcher** adds language packs to the native **Options → Language** menu in GTA San Andreas 1.0 US Hoodlum. Keep English and Spanish available alongside Russian or another translation. Each pack specifies its own text file, font metrics, and textures.
+**SA-LanguageSwitcher** adds language packs to the native **Options → Language** menu in GTA San Andreas 1.0 US Hoodlum. Keep English and Spanish available alongside Russian or another translation. Each pack specifies its own text file, font metrics, and textures.
 
 This repository contains the source and an INI template. Supply the translation and fonts separately.
 
@@ -30,7 +30,7 @@ FontMetricsFile=data\fonts_ru.dat
 FontTextureFile=models\fonts_ru.txd
 ```
 
-These paths are for the corresponding **Russian Localization Support** files. The row reads **Russian** before activation and **Русский** once the Russian pack is active.
+These paths expect files from the **SanLTD** or **MSLK** translation. The row reads **Russian** before activation and **Русский** once the Russian pack is active.
 
 ## Add another language
 
