@@ -283,6 +283,24 @@ __declspec(naked) void ReadStockLanguage() {
     }
 }
 
+// Hoodlum's SCM opcode 09FB loads the preference into ECX at 0x47B4EC.
+// Stock shop scripts branch on codes 0–4 before creating their menu panels.
+// Give them the stock code while keeping the extended code visible to mods.
+__declspec(naked) void ReadScriptStockLanguage() {
+    __asm {
+        pushfd
+        cmp dword ptr [active], 0
+        je readPreference
+        movsx ecx, byte ptr [stockLanguage]
+        popfd
+        ret
+    readPreference:
+        movsx ecx, byte ptr ds:[0BA67CCh]
+        popfd
+        ret
+    }
+}
+
 // LoadSettings can request a stock GXT before the renderer and language TXDs
 // are ready. Stash the saved code and supply a valid stock preference meanwhile.
 int __cdecl ReadSavedLanguage(void* file, char* value, int size) {
@@ -494,6 +512,7 @@ struct Patch {
     uintptr_t target;
     uintptr_t replacement;
     uintptr_t* forwardedTarget = nullptr;
+    unsigned char languageReadOperand = 0x05; // ModR/M byte for movsx EAX.
 
     size_t Length() const { return target ? 5 : 7; }
 };
@@ -521,7 +540,7 @@ bool ApplyHooks(std::span<const Patch> patches) {
             }
             if (bytes[0] != patch.opcode || actualTarget != patch.target) return false;
         } else {
-            constexpr unsigned char stockRead[] = {0x0F, 0xBE, 0x05, 0xCC, 0x67, 0xBA, 0x00};
+            const unsigned char stockRead[] = {0x0F, 0xBE, patch.languageReadOperand, 0xCC, 0x67, 0xBA, 0x00};
             if (memcmp(bytes, stockRead, sizeof stockRead) != 0) {
                 if (logFile) logFile << "Unexpected language read at 0x" << std::hex
                                      << patch.site << std::dec << std::endl;
@@ -574,7 +593,8 @@ bool InstallHooks(bool settingsReaderAvailable) {
     const Patch languagePatches[] = {
         {0x6A01C8, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)},
         {0x69FCEB, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)},
-        {0x7193A0, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)}
+        {0x7193A0, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)},
+        {0x47B4EC, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadScriptStockLanguage), nullptr, 0x0D}
     };
     // Retain menu support when a third-party patch owns one of these sites.
     publishLanguageCodes = ApplyHooks(languagePatches);

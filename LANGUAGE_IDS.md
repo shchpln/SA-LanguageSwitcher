@@ -51,3 +51,7 @@ in memory and in the settings file.
 
 Registered codes identify languages independently of the glyph encodings
 supported by their individual GXT and font files.
+
+The stock SCM opcode `09FB` (`GET_CURRENT_LANGUAGE`) returns the last stock
+code while a language pack is active. Stock scripts use that value to select
+shop menu layouts. Use the [ASI API](API.md) to read the active pack's code.
