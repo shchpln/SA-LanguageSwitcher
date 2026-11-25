@@ -3,8 +3,10 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 #include "CFont.h"
 #include "CMenuManager.h"
@@ -20,6 +22,7 @@ using Textures = std::array<RwTexture*, 2>;
 
 struct Language {
     std::string id, label, nativeLabel, gxt, key, txd;
+    char languageCode = 0;
     FontPair metrics{};
     Textures textures{};
 };
@@ -28,18 +31,38 @@ fs::path directory, gameRoot, ini;
 std::ofstream logFile;
 std::vector<Language> languages;
 Language* active = nullptr;
+char stockLanguage = 0;
+char savedStockLanguage = 0;
+int savedGameLanguage = -1;
 uintptr_t mainGxtOpen = 0;
 uintptr_t missionGxtOpen = 0;
 FontPair originalMetrics{};
 Textures originalTextures{};
 int firstCustom = 0;
 bool initialized = false;
+bool publishLanguageCodes = false;
 constexpr auto languagePage = MENUPAGE_LANGUAGE_SETTINGS;
 
 std::wstring Read(const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
     wchar_t value[1024]{};
     GetPrivateProfileStringW(section, key, fallback, value, 1024, ini.c_str());
     return value;
+}
+
+char RegisteredLanguageCode(std::wstring_view packageId) {
+    // Order is part of the public contract in LANGUAGE_IDS.md.
+    constexpr std::wstring_view registered[] = {
+        L"Russian", L"Japanese", L"Polish", L"BrazilianPortuguese", L"Portuguese",
+        L"ChineseSimplified", L"ChineseTraditional", L"Korean", L"Turkish", L"Ukrainian"
+    };
+    // A suffix distinguishes translations of the same registered language.
+    const auto language = packageId.substr(0, packageId.find(L'.'));
+    for (size_t i = 0; i < std::size(registered); ++i) {
+        const auto name = registered[i];
+        if (language.size() == name.size() && _wcsnicmp(language.data(), name.data(), name.size()) == 0)
+            return static_cast<char>(5 + i);
+    }
+    return 0;
 }
 
 fs::path ResolveResource(const fs::path& configuredPath) {
@@ -123,6 +146,24 @@ void ReadLanguages() {
         if (lang.label.empty()) lang.label = lang.id;
         lang.nativeLabel = EncodeMenuLabel(
             Read(section.c_str(), L"NativeMenuLabel", russian ? L"Русский" : L""), russian);
+        const auto registered = RegisteredLanguageCode(std::wstring_view(section).substr(9));
+        const auto code = Read(section.c_str(), L"LanguageId", L"");
+        lang.languageCode = registered;
+        if (!code.empty()) {
+            wchar_t* end = nullptr;
+            const auto number = wcstol(code.c_str(), &end, 10);
+            const bool privateCode = number >= 64 && number <= 127
+                && std::ranges::none_of(languages, [number](const Language& other) {
+                    return other.languageCode == number;
+                });
+            if (*end == L'\0' && (registered ? number == registered : privateCode)) {
+                lang.languageCode = static_cast<char>(number);
+            } else if (logFile) {
+                logFile << "LanguageId does not match the registry or available private codes for "
+                        << lang.id << ": "
+                        << fs::path(code) << std::endl;
+            }
+        }
 
         const auto metricsPath = ResolveResource(
             Read(section.c_str(), L"FontMetricsFile", russian ? L"data\\fonts_ru.dat" : L""));
@@ -147,10 +188,12 @@ void ReadLanguages() {
     }
 }
 
-void SwitchTo(Language* language) {
+void SwitchTo(Language* language, bool saveSettings = false) {
     if (active == language) return;
     // On first activation save the live atlas and metrics, including Mod Loader overrides.
     if (!active) {
+        const auto preference = static_cast<unsigned char>(FrontEndMenuManager.m_nPrefsLanguage);
+        stockLanguage = preference <= 4 ? static_cast<char>(preference) : 0;
         for (size_t i = 0; i < 2; ++i) {
             originalMetrics[i] = gFontData[i];
             originalTextures[i] = CFont::Sprite[i].m_pTexture;
@@ -159,6 +202,9 @@ void SwitchTo(Language* language) {
     CFont::DrawFonts();
     const auto* previous = active;
     active = language;
+    if (publishLanguageCodes)
+        FrontEndMenuManager.m_nPrefsLanguage = language && language->languageCode
+            ? language->languageCode : stockLanguage;
     for (size_t i = 0; i < 2; ++i) {
         // Each live sprite owns one reference, independently of the retained TXD.
         if (language) (void)RwTextureAddRef(language->textures[i]);
@@ -174,6 +220,49 @@ void SwitchTo(Language* language) {
     if (missionName[0]) TheText.LoadMissionTable(missionName);
     const auto selection = language ? fs::path(language->id).wstring() : std::wstring{};
     WritePrivateProfileStringW(L"Selection", L"Language", selection.c_str(), ini.c_str());
+    if (language && publishLanguageCodes) {
+        // Save a stock fallback before allowing the game's own settings writer
+        // to persist an extended language code in gta_sa.set.
+        const auto fallback = std::to_wstring(stockLanguage);
+        if (WritePrivateProfileStringW(L"Selection", L"StockLanguage", fallback.c_str(), ini.c_str())) {
+            if (saveSettings || savedGameLanguage != FrontEndMenuManager.m_nPrefsLanguage)
+                FrontEndMenuManager.SaveSettings();
+        } else if (logFile) {
+            logFile << "Could not save stock language fallback." << std::endl;
+        }
+    }
+}
+
+// These Hoodlum readers originally load m_nPrefsLanguage into EAX. GTA's
+// GXT name tables and font scaling retain the stock language while a pack
+// exposes its custom code through the public preference byte.
+__declspec(naked) void ReadStockLanguage() {
+    __asm {
+        cmp dword ptr [active], 0
+        je readPreference
+        movsx eax, byte ptr [stockLanguage]
+        ret
+    readPreference:
+        movsx eax, byte ptr ds:[0BA67CCh]
+        ret
+    }
+}
+
+// LoadSettings can request a stock GXT before the renderer and language TXDs
+// are ready. Stash the saved code and supply a valid stock preference meanwhile.
+int __cdecl ReadSavedLanguage(void* file, char* value, int size) {
+    auto read = reinterpret_cast<int(__cdecl*)(void*, char*, int)>(0x538950);
+    const auto count = read(file, value, size);
+    if (count == 1 && size == 1) {
+        savedGameLanguage = static_cast<unsigned char>(*value);
+        if (savedGameLanguage > 4) {
+            *value = savedStockLanguage;
+            if (logFile) logFile << "Settings language code " << savedGameLanguage
+                                 << "; using stock code " << static_cast<int>(savedStockLanguage)
+                                 << " until the menu initializes." << std::endl;
+        }
+    }
+    return count;
 }
 
 // Both main and mission GXT opens call CFileMgr::OpenFile in the verified Hoodlum executable.
@@ -219,16 +308,23 @@ const char* __fastcall GetText(CText* text, void*, const char* key) {
 }
 
 void __fastcall ProcessOptions(CMenuManager* menu, void*, char input, char* exit, char enter) {
+    bool returningToStock = false;
     if (initialized && firstCustom && menu->m_nCurrentMenuPage == languagePage && enter) {
         const auto index = menu->m_nCurrentMenuEntry;
         if (index >= firstCustom && static_cast<size_t>(index - firstCustom) < languages.size()) {
-            SwitchTo(&languages[index - firstCustom]);
+            SwitchTo(&languages[index - firstCustom], true);
             return;
         }
-        if (index >= 0 && index < firstCustom && active) SwitchTo(nullptr);
+        if (index >= 0 && index < firstCustom && active) {
+            returningToStock = publishLanguageCodes;
+            SwitchTo(nullptr);
+        }
     }
     auto process = reinterpret_cast<void(__thiscall*)(CMenuManager*, char, char*, char)>(0x576FE0);
     process(menu, input, exit, enter);
+    // GTA may skip its settings write when the restored stock code already
+    // equals the selected language. Replace the previous custom byte anyway.
+    if (returningToStock) menu->SaveSettings();
 }
 
 CMenuScreen* FindLanguageScreen() {
@@ -336,7 +432,17 @@ void InitializeMenu() {
     for (auto& lang : languages) {
         if (fs::path(lang.id).wstring() == saved) {
             SwitchTo(&lang);
-            break;
+            return;
+        }
+    }
+    // If the INI lost its pack ID, restore the first installed pack with
+    // the saved language code. Variants share a code but have distinct IDs.
+    if (publishLanguageCodes && savedGameLanguage >= 5 && savedGameLanguage <= 127) {
+        for (auto& lang : languages) {
+            if (lang.languageCode == savedGameLanguage) {
+                SwitchTo(&lang);
+                return;
+            }
         }
     }
 }
@@ -353,21 +459,11 @@ struct Patch {
     uintptr_t target;
     uintptr_t replacement;
     uintptr_t* forwardedTarget = nullptr;
+
+    size_t Length() const { return target ? 5 : 7; }
 };
 
-bool InstallHooks() {
-    // Addresses and call targets verified with dumpbin against the workspace Hoodlum executable.
-    const Patch patches[] = {
-        {0x6A0228, 0xE8, 0x538900, reinterpret_cast<uintptr_t>(&OpenMainGxt), &mainGxtOpen},
-        {0x69FD5A, 0xE8, 0x538900, reinterpret_cast<uintptr_t>(&OpenMissionGxt), &missionGxtOpen},
-        {0x57B66F, 0xE8, 0x576FE0, reinterpret_cast<uintptr_t>(&ProcessOptions)},
-        {0x57B702, 0xE8, 0x576FE0, reinterpret_cast<uintptr_t>(&ProcessOptions)},
-        {0x53E82D, 0xE8, 0x57C290, reinterpret_cast<uintptr_t>(&DrawMenu)},
-        {0x53EB8C, 0xE8, 0x57C290, reinterpret_cast<uintptr_t>(&DrawMenu)},
-        // Only resolve custom keys at the native menu's row text call sites.
-        {0x579D73, 0xE8, 0x6A0050, reinterpret_cast<uintptr_t>(&GetText)},
-        {0x57FE2F, 0xE8, 0x6A0050, reinterpret_cast<uintptr_t>(&GetText)}
-    };
+bool ApplyHooks(std::span<const Patch> patches) {
     for (const auto& patch : patches) {
         const auto* bytes = reinterpret_cast<const unsigned char*>(patch.site);
         if (patch.target) {
@@ -389,13 +485,20 @@ bool InstallHooks() {
                 }
             }
             if (bytes[0] != patch.opcode || actualTarget != patch.target) return false;
+        } else {
+            constexpr unsigned char stockRead[] = {0x0F, 0xBE, 0x05, 0xCC, 0x67, 0xBA, 0x00};
+            if (memcmp(bytes, stockRead, sizeof stockRead) != 0) {
+                if (logFile) logFile << "Unexpected language read at 0x" << std::hex
+                                     << patch.site << std::dec << std::endl;
+                return false;
+            }
         }
     }
     // Change protection on every range before writing any hook.
-    DWORD previous[std::size(patches)]{};
+    std::vector<DWORD> previous(patches.size());
     size_t writable = 0;
     for (const auto& patch : patches) {
-        if (!VirtualProtect(reinterpret_cast<void*>(patch.site), 5, PAGE_EXECUTE_READWRITE, &previous[writable]))
+        if (!VirtualProtect(reinterpret_cast<void*>(patch.site), patch.Length(), PAGE_EXECUTE_READWRITE, &previous[writable]))
             break;
         ++writable;
     }
@@ -405,14 +508,44 @@ bool InstallHooks() {
             const auto displacement = patch.replacement - patch.site - 5;
             bytes[0] = patch.opcode;
             memcpy(bytes + 1, &displacement, sizeof displacement);
-            FlushInstructionCache(GetCurrentProcess(), bytes, 5);
+            if (patch.Length() > 5) memset(bytes + 5, 0x90, patch.Length() - 5);
+            FlushInstructionCache(GetCurrentProcess(), bytes, patch.Length());
         }
     }
     for (size_t i = writable; i > 0; --i) {
         DWORD ignored;
-        VirtualProtect(reinterpret_cast<void*>(patches[i - 1].site), 5, previous[i - 1], &ignored);
+        VirtualProtect(reinterpret_cast<void*>(patches[i - 1].site), patches[i - 1].Length(), previous[i - 1], &ignored);
     }
     return writable == std::size(patches);
+}
+
+bool InstallHooks(bool settingsReaderAvailable) {
+    // Addresses and call targets verified with dumpbin against the workspace Hoodlum executable.
+    const Patch menuPatches[] = {
+        {0x6A0228, 0xE8, 0x538900, reinterpret_cast<uintptr_t>(&OpenMainGxt), &mainGxtOpen},
+        {0x69FD5A, 0xE8, 0x538900, reinterpret_cast<uintptr_t>(&OpenMissionGxt), &missionGxtOpen},
+        {0x57B66F, 0xE8, 0x576FE0, reinterpret_cast<uintptr_t>(&ProcessOptions)},
+        {0x57B702, 0xE8, 0x576FE0, reinterpret_cast<uintptr_t>(&ProcessOptions)},
+        {0x53E82D, 0xE8, 0x57C290, reinterpret_cast<uintptr_t>(&DrawMenu)},
+        {0x53EB8C, 0xE8, 0x57C290, reinterpret_cast<uintptr_t>(&DrawMenu)},
+        // Only resolve custom keys at the native menu's row text call sites.
+        {0x579D73, 0xE8, 0x6A0050, reinterpret_cast<uintptr_t>(&GetText)},
+        {0x57FE2F, 0xE8, 0x6A0050, reinterpret_cast<uintptr_t>(&GetText)}
+    };
+    if (!ApplyHooks(menuPatches)) return false;
+    if (!settingsReaderAvailable
+        || std::ranges::none_of(languages, [](const Language& lang) { return lang.languageCode != 0; }))
+        return true;
+    const Patch languagePatches[] = {
+        {0x6A01C8, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)},
+        {0x69FCEB, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)},
+        {0x7193A0, 0xE8, 0, reinterpret_cast<uintptr_t>(&ReadStockLanguage)}
+    };
+    // Retain menu support when a third-party patch owns one of these sites.
+    publishLanguageCodes = ApplyHooks(languagePatches);
+    if (!publishLanguageCodes && logFile)
+        logFile << "Language codes remain at their stock values." << std::endl;
+    return true;
 }
 }
 
@@ -430,7 +563,6 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID) {
         ini = directory / L"LanguageSwitcher.ini";
         if (Read(L"General", L"EnableLogging", L"1") != L"0")
             logFile.open(directory / L"LanguageSwitcher.log", std::ios::trunc);
-        if (Read(L"General", L"Enabled", L"1") == L"0") return TRUE;
         const auto version = plugin::GetGameVersion();
         if (logFile) logFile << "Game: " << fs::path(path.data())
                              << ", plugin-sdk version ID: " << version << std::endl;
@@ -438,9 +570,20 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID) {
             if (logFile) logFile << "Unsupported game build. No hooks installed." << std::endl;
             return TRUE;
         }
+        const auto fallback = GetPrivateProfileIntW(L"Selection", L"StockLanguage", 0, ini.c_str());
+        savedStockLanguage = fallback <= 4 ? static_cast<char>(fallback) : 0;
+        // Install the reader even if the switcher is disabled or its pack was
+        // removed, so a previously saved custom code remains safe to read.
+        const Patch settingsRead[] = {
+            {0x57CABB, 0xE8, 0x538950, reinterpret_cast<uintptr_t>(&ReadSavedLanguage)}
+        };
+        const bool settingsReaderAvailable = ApplyHooks(settingsRead);
+        if (!settingsReaderAvailable && logFile)
+            logFile << "Cannot preserve extended language codes in gta_sa.set." << std::endl;
+        if (Read(L"General", L"Enabled", L"1") == L"0") return TRUE;
         ReadLanguages();
-        if (!languages.empty() && !InstallHooks() && logFile)
-            logFile << "Hook installation failed. No hooks installed." << std::endl;
+        if (!languages.empty() && !InstallHooks(settingsReaderAvailable) && logFile)
+            logFile << "Menu hook installation failed." << std::endl;
     } catch (...) {
         if (logFile) logFile << "Initialization failed." << std::endl;
     }
