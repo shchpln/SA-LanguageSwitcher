@@ -85,6 +85,11 @@ Use the names of your own files. The GXT, DAT, and TXD must come from the same t
 
 Both packs expose the Russian language code `5`. The INI stores the exact pack ID, such as `Russian.SanLTD`, so the ASI can restore the selected translation. Use an ASCII label for additional Russian sections. Cyrillic `NativeMenuLabel` encoding currently applies to `[Language.Russian]`.
 
+## API for other mods
+
+The ASI exports `GetCurrentLanguageId()` and `GetCurrentLanguageName()`. See
+[the API reference](API.md) for return values and a `GetProcAddress` example.
+
 ## Compatibility and diagnostics
 
 The target is **GTA San Andreas 1.0 US Hoodlum (x86)**. Without Mod Loader, the ASI uses the stock menu table. With Mod Loader 0.3.10, it finds the relocated table and preserves the existing GXT handling for stock languages. It applies to GTA's text and menus. SA-MP client chat and dialogs are outside its scope.

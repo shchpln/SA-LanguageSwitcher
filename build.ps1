@@ -30,8 +30,9 @@ $includeDirs = @('shared', 'shared\game', 'injector', 'plugin_sa\game_sa\rw', 'p
 $includes = $includeDirs | ForEach-Object { '/I"' + (Join-Path $sdkRoot $_) + '"' }
 $sources = (@($pluginSources) + $sdkSources + $gameSources) | ForEach-Object { '"' + $_ + '"' }
 $stagedPlugin = Join-Path $buildDir 'LanguageSwitcher.asi'
-$command = 'call "{0}" -no_logo -arch=x86 -host_arch=x64 && cl.exe /nologo /LD /std:c++latest /EHsc /utf-8 /O2 /Gy /MT /GL /DGTASA /DRW /D_CRT_SECURE_NO_WARNINGS {1} {2} /link /LTCG /OPT:REF /MACHINE:X86 /OUT:"{3}" user32.lib && dumpbin.exe /headers /dependents "{3}"' -f `
-    $devCmd, ($includes -join ' '), ($sources -join ' '), $stagedPlugin
+$exports = Join-Path $PSScriptRoot 'LanguageSwitcher.def'
+$command = 'call "{0}" -no_logo -arch=x86 -host_arch=x64 && cl.exe /nologo /LD /std:c++latest /EHsc /utf-8 /O2 /Gy /MT /GL /DGTASA /DRW /D_CRT_SECURE_NO_WARNINGS {1} {2} /link /LTCG /OPT:REF /MACHINE:X86 /OUT:"{3}" /DEF:"{4}" user32.lib && dumpbin.exe /headers /dependents /exports "{3}"' -f `
+    $devCmd, ($includes -join ' '), ($sources -join ' '), $stagedPlugin, $exports
 
 Push-Location -LiteralPath $buildDir
 try {

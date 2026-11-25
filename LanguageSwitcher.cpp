@@ -21,7 +21,7 @@ using FontPair = std::array<tFontData, 2>;
 using Textures = std::array<RwTexture*, 2>;
 
 struct Language {
-    std::string id, label, nativeLabel, gxt, key, txd;
+    std::string id, label, nativeLabel, apiName, gxt, key, txd;
     char languageCode = 0;
     FontPair metrics{};
     Textures textures{};
@@ -41,7 +41,32 @@ Textures originalTextures{};
 int firstCustom = 0;
 bool initialized = false;
 bool publishLanguageCodes = false;
+bool supportedGame = false;
 constexpr auto languagePage = MENUPAGE_LANGUAGE_SETTINGS;
+
+struct LanguageIdentity {
+    std::wstring_view sectionPrefix;
+    const char* name;
+};
+
+// Array indices are the stable public codes in LANGUAGE_IDS.md.
+constexpr LanguageIdentity languageIdentities[] = {
+    {L"", "english"},
+    {L"", "french"},
+    {L"", "german"},
+    {L"", "italian"},
+    {L"", "spanish"},
+    {L"Russian", "russian"},
+    {L"Japanese", "japanese"},
+    {L"Polish", "polish"},
+    {L"BrazilianPortuguese", "brazilian portuguese"},
+    {L"Portuguese", "portuguese"},
+    {L"ChineseSimplified", "simplified chinese"},
+    {L"ChineseTraditional", "traditional chinese"},
+    {L"Korean", "korean"},
+    {L"Turkish", "turkish"},
+    {L"Ukrainian", "ukrainian"}
+};
 
 std::wstring Read(const wchar_t* section, const wchar_t* key, const wchar_t* fallback) {
     wchar_t value[1024]{};
@@ -49,18 +74,26 @@ std::wstring Read(const wchar_t* section, const wchar_t* key, const wchar_t* fal
     return value;
 }
 
+std::string EncodeApiName(std::wstring_view name) {
+    // Use invariant Unicode casing so the API is independent of Windows locale.
+    const auto length = static_cast<int>(name.size());
+    const int count = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+        name.data(), length, nullptr, 0, nullptr, nullptr, 0);
+    if (count <= 0) return {};
+    std::wstring lower(count, L'\0');
+    if (!LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE,
+        name.data(), length, lower.data(), count, nullptr, nullptr, 0)) return {};
+    const auto utf8 = fs::path(lower).u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
 char RegisteredLanguageCode(std::wstring_view packageId) {
-    // Order is part of the public contract in LANGUAGE_IDS.md.
-    constexpr std::wstring_view registered[] = {
-        L"Russian", L"Japanese", L"Polish", L"BrazilianPortuguese", L"Portuguese",
-        L"ChineseSimplified", L"ChineseTraditional", L"Korean", L"Turkish", L"Ukrainian"
-    };
     // A suffix distinguishes translations of the same registered language.
     const auto language = packageId.substr(0, packageId.find(L'.'));
-    for (size_t i = 0; i < std::size(registered); ++i) {
-        const auto name = registered[i];
+    for (size_t code = 5; code < std::size(languageIdentities); ++code) {
+        const auto name = languageIdentities[code].sectionPrefix;
         if (language.size() == name.size() && _wcsnicmp(language.data(), name.data(), name.size()) == 0)
-            return static_cast<char>(5 + i);
+            return static_cast<char>(code);
     }
     return 0;
 }
@@ -142,8 +175,10 @@ void ReadLanguages() {
         const bool russian = section == L"Language.Russian";
         Language lang;
         lang.id = fs::path(section.substr(9)).string();
-        lang.label = EncodeMenuLabel(Read(section.c_str(), L"MenuLabel", section.c_str() + 9), false);
+        const auto menuLabel = Read(section.c_str(), L"MenuLabel", section.c_str() + 9);
+        lang.label = EncodeMenuLabel(menuLabel, false);
         if (lang.label.empty()) lang.label = lang.id;
+        lang.apiName = EncodeApiName(menuLabel.empty() ? section.substr(9) : menuLabel);
         lang.nativeLabel = EncodeMenuLabel(
             Read(section.c_str(), L"NativeMenuLabel", russian ? L"Русский" : L""), russian);
         const auto registered = RegisteredLanguageCode(std::wstring_view(section).substr(9));
@@ -549,6 +584,22 @@ bool InstallHooks(bool settingsReaderAvailable) {
 }
 }
 
+// Exported names and x86 calling conventions are declared in LanguageSwitcher.def.
+// Callers use these from the game thread, where the active pack is changed.
+extern "C" int __cdecl GetCurrentLanguageId() {
+    if (!supportedGame) return -1;
+    if (active) return active->languageCode ? active->languageCode : -1;
+    const int code = static_cast<unsigned char>(FrontEndMenuManager.m_nPrefsLanguage);
+    return code <= 127 ? code : -1;
+}
+
+extern "C" const char* __cdecl GetCurrentLanguageName() {
+    const auto code = GetCurrentLanguageId();
+    if (code >= 0 && static_cast<size_t>(code) < std::size(languageIdentities))
+        return languageIdentities[code].name;
+    return active && !active->apiName.empty() ? active->apiName.c_str() : nullptr;
+}
+
 BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     try {
@@ -570,6 +621,7 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID) {
             if (logFile) logFile << "Unsupported game build. No hooks installed." << std::endl;
             return TRUE;
         }
+        supportedGame = true;
         const auto fallback = GetPrivateProfileIntW(L"Selection", L"StockLanguage", 0, ini.c_str());
         savedStockLanguage = fallback <= 4 ? static_cast<char>(fallback) : 0;
         // Install the reader even if the switcher is disabled or its pack was
