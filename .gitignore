@@ -1,0 +1,12 @@
+/build/
+/plugin-sdk/
+*.asi
+*.obj
+*.pdb
+*.log
+*.in-use
+*.next
+*.gxt
+*.dat
+*.txd
+/data/
