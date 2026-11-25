@@ -13,6 +13,8 @@ This repository contains the source and an INI template. Supply the translation 
 - Changes take effect immediately. The plugin saves the active pack ID in the INI's `[Selection]` section and the language code in `gta_sa.set`. It restores the pack once the menu is initialized on the next launch.
 - The menu can hold up to six additional languages. The number of available rows depends on the Language screen layout.
 
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/b9ded1dd-ce17-4904-8ae1-4c209d31b8a3" />
+
 ## Install
 
 1. Put `LanguageSwitcher.asi` and `LanguageSwitcher.ini` together. With a regular ASI loader, install them in the game directory or `scripts`. With Mod Loader 0.3.10, use a dedicated folder under `modloader`. Install one copy of the ASI.
